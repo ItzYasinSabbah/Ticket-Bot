@@ -1,5 +1,5 @@
 entrypoint = "index.js"
-modules = ["nodejs-20"]
+modules = ["nodejs-18", "nix"]
 hidden = [".config", "package-lock.json"]
 
 [gitHubImport]
@@ -17,10 +17,19 @@ deploymentTarget = "cloudrun"
 ignorePorts = false
 
 [workflows]
-runButton = "Run"
+runButton = "Running Ticket bot"
 
 [[workflows.workflow]]
 name = "Run"
+mode = "sequential"
+author = 40026577
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node index.js"
+
+[[workflows.workflow]]
+name = "Running Ticket bot"
 mode = "sequential"
 author = 40026577
 
