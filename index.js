@@ -25,14 +25,16 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.User, Partials.GuildMember],
 })
 
-// Collection to store active tickets and categories
+// Collection to store active tickets, categories, and support role
 client.tickets = new Collection()
 client.categories = new Collection()
+client.supportRoleId = null
 
 // File paths for persistent storage
 const DATA_PATH = path.join(__dirname, "data")
 const TICKETS_FILE = path.join(DATA_PATH, "tickets.json")
 const CATEGORIES_FILE = path.join(DATA_PATH, "categories.json")
+const CONFIG_FILE = path.join(DATA_PATH, "config.json")
 
 // Function to ensure data directory exists
 async function ensureDataDirectory() {
@@ -53,6 +55,14 @@ async function saveTickets() {
 async function saveCategories() {
   const categoryData = Object.fromEntries(client.categories)
   await fs.writeFile(CATEGORIES_FILE, JSON.stringify(categoryData, null, 2))
+}
+
+// Function to save config (support role) to file
+async function saveConfig() {
+  const configData = {
+    supportRoleId: client.supportRoleId,
+  }
+  await fs.writeFile(CONFIG_FILE, JSON.stringify(configData, null, 2))
 }
 
 // Function to load data from files
@@ -78,6 +88,14 @@ async function loadData() {
       }
     } catch (error) {
       console.log("No existing categories found, starting fresh")
+    }
+
+    // Load config
+    try {
+      const configData = JSON.parse(await fs.readFile(CONFIG_FILE, "utf-8"))
+      client.supportRoleId = configData.supportRoleId
+    } catch (error) {
+      console.log("No existing config found, starting fresh")
     }
   } catch (error) {
     console.error("Error loading data:", error)
@@ -129,6 +147,12 @@ client.once("ready", async () => {
           name: "other",
           description: "دسته‌بندی برای تیکت‌های Other",
           type: 7,
+          required: true,
+        },
+        {
+          name: "support_role",
+          description: "رول پشتیبانی که به تمام تیکت‌ها دسترسی خواهد داشت",
+          type: 8, // ROLE type
           required: true,
         },
       ],
@@ -187,11 +211,16 @@ client.on("interactionCreate", async (interaction) => {
           client.categories.set(name, category.id)
         }
 
-        // Save categories after setup
+        // Get and save support role
+        const supportRole = interaction.options.getRole("support_role")
+        client.supportRoleId = supportRole.id
+
+        // Save categories and config
         await saveCategories()
+        await saveConfig()
 
         await interaction.reply({
-          content: "دسته‌بندی‌های سیستم تیکت با موفقیت تنظیم شدند!",
+          content: `دسته‌بندی‌های سیستم تیکت با موفقیت تنظیم شدند! رول پشتیبانی: ${supportRole.name}`,
           ephemeral: true,
         })
       }
@@ -305,24 +334,40 @@ async function createTopicTicket(interaction, topic) {
     other: "Other",
   }
 
+  // Create permission overwrites array
+  const permissionOverwrites = [
+    {
+      id: guild.id,
+      deny: [PermissionFlagsBits.ViewChannel],
+    },
+    {
+      id: user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    },
+  ]
+
+  // Add support role permissions if it exists
+  if (client.supportRoleId) {
+    permissionOverwrites.push({
+      id: client.supportRoleId,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.ManageMessages,
+      ],
+    })
+  }
+
   const ticketChannel = await guild.channels.create({
     name: `ticket-${topicNames[topic].toLowerCase()}-${user.username}`,
     type: ChannelType.GuildText,
     parent: categoryId,
-    permissionOverwrites: [
-      {
-        id: guild.id,
-        deny: [PermissionFlagsBits.ViewChannel],
-      },
-      {
-        id: user.id,
-        allow: [
-          PermissionFlagsBits.ViewChannel,
-          PermissionFlagsBits.SendMessages,
-          PermissionFlagsBits.ReadMessageHistory,
-        ],
-      },
-    ],
+    permissionOverwrites: permissionOverwrites,
   })
 
   const ticketId = Date.now().toString(36) + Math.random().toString(36).substr(2)
@@ -364,6 +409,14 @@ async function createTopicTicket(interaction, topic) {
     components: [closeButton],
   })
 
+  // Ping support role if it exists
+  if (client.supportRoleId) {
+    await ticketChannel.send({
+      content: `<@&${client.supportRoleId}> یک تیکت جدید ایجاد شده است.`,
+      allowedMentions: { roles: [client.supportRoleId] },
+    })
+  }
+
   // Store the welcome message ID for later updates
   ticketData.messageId = welcomeMessage.id
   client.tickets.set(ticketId, ticketData)
@@ -388,6 +441,18 @@ async function closeTicket(interaction, ticketId) {
   if (ticket.closed) {
     return interaction.reply({
       content: "این تیکت قبلاً بسته شده است.",
+      ephemeral: true,
+    })
+  }
+
+  // Check if user has permission to close the ticket
+  const isTicketCreator = interaction.user.id === ticket.userId
+  const hasManageChannels = interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)
+  const isSupportRole = client.supportRoleId && interaction.member.roles.cache.has(client.supportRoleId)
+
+  if (!isTicketCreator && !hasManageChannels && !isSupportRole) {
+    return interaction.reply({
+      content: "شما دسترسی لازم برای بستن این تیکت را ندارید.",
       ephemeral: true,
     })
   }
@@ -419,6 +484,15 @@ async function closeTicket(interaction, ticketId) {
         ViewChannel: false,
         SendMessages: false,
       })
+
+      // Keep access for support role
+      if (client.supportRoleId) {
+        await channel.permissionOverwrites.edit(client.supportRoleId, {
+          ViewChannel: true,
+          SendMessages: false,
+          ReadMessageHistory: true,
+        })
+      }
 
       // Disable the close button in the original message and add delete button
       if (ticket.messageId) {
@@ -511,7 +585,10 @@ async function deleteTicket(interaction, ticketId) {
   }
 
   // Check if user has permission to delete tickets
-  if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+  const hasManageChannels = interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)
+  const isSupportRole = client.supportRoleId && interaction.member.roles.cache.has(client.supportRoleId)
+
+  if (!hasManageChannels && !isSupportRole) {
     return interaction.reply({
       content: "شما دسترسی لازم برای حذف تیکت‌ها را ندارید.",
       ephemeral: true,
