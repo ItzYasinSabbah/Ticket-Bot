@@ -51,9 +51,16 @@ async function saveTickets() {
   await fs.writeFile(TICKETS_FILE, JSON.stringify(ticketData, null, 2))
 }
 
-// Function to save categories to file
 async function saveCategories() {
-  const categoryData = Object.fromEntries(client.categories)
+  const categoryData = {}
+  for (const [name, categoryInfo] of client.categories) {
+    if (typeof categoryInfo === "object") {
+      categoryData[name] = categoryInfo
+    } else {
+      // Handle old format for backward compatibility
+      categoryData[name] = categoryInfo
+    }
+  }
   await fs.writeFile(CATEGORIES_FILE, JSON.stringify(categoryData, null, 2))
 }
 
@@ -83,8 +90,19 @@ async function loadData() {
     // Load categories
     try {
       const categoryData = JSON.parse(await fs.readFile(CATEGORIES_FILE, "utf-8"))
-      for (const [name, id] of Object.entries(categoryData)) {
-        client.categories.set(name, id)
+      for (const [name, categoryInfo] of Object.entries(categoryData)) {
+        if (typeof categoryInfo === "object" && categoryInfo.id) {
+          // New format with full category info
+          client.categories.set(name, categoryInfo)
+        } else {
+          // Old format - just the ID, create default structure
+          client.categories.set(name, {
+            id: categoryInfo,
+            label: name.charAt(0).toUpperCase() + name.slice(1),
+            description: `تیکت‌های ${name}`,
+            emoji: "📝",
+          })
+        }
       }
     } catch (error) {
       console.log("No existing categories found, starting fresh")
@@ -157,6 +175,54 @@ client.once("ready", async () => {
         },
       ],
     },
+    {
+      name: "addcategory",
+      description: "اضافه کردن دسته‌بندی جدید به سیستم تیکت (فقط ادمین)",
+      options: [
+        {
+          name: "name",
+          description: "نام دسته‌بندی (انگلیسی، بدون فاصله)",
+          type: 3, // STRING type
+          required: true,
+        },
+        {
+          name: "label",
+          description: "برچسب نمایشی دسته‌بندی",
+          type: 3, // STRING type
+          required: true,
+        },
+        {
+          name: "description",
+          description: "توضیحات دسته‌بندی",
+          type: 3, // STRING type
+          required: true,
+        },
+        {
+          name: "emoji",
+          description: "ایموجی دسته‌بندی",
+          type: 3, // STRING type
+          required: true,
+        },
+        {
+          name: "category_channel",
+          description: "کانال دسته‌بندی که تیکت‌ها در آن ایجاد می‌شوند",
+          type: 7, // CHANNEL type
+          required: true,
+        },
+      ],
+    },
+    {
+      name: "deletecategory",
+      description: "حذف دسته‌بندی از سیستم تیکت (فقط ادمین)",
+      options: [
+        {
+          name: "name",
+          description: "نام دسته‌بندی برای حذف",
+          type: 3, // STRING type
+          required: true,
+        },
+      ],
+    },
   ]
 
   client.application.commands.set(commands)
@@ -223,6 +289,90 @@ client.on("interactionCreate", async (interaction) => {
           content: `دسته‌بندی‌های سیستم تیکت با موفقیت تنظیم شدند! رول پشتیبانی: ${supportRole.name}`,
           ephemeral: true,
         })
+      } else if (interaction.commandName === "addcategory") {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({
+            content: "شما به دسترسی ادمین نیاز دارید تا بتوانید دسته‌بندی اضافه کنید!",
+            ephemeral: true,
+          })
+        }
+
+        const name = interaction.options.getString("name").toLowerCase()
+        const label = interaction.options.getString("label")
+        const description = interaction.options.getString("description")
+        const emoji = interaction.options.getString("emoji")
+        const categoryChannel = interaction.options.getChannel("category_channel")
+
+        // Validate category name (only letters, numbers, underscore)
+        if (!/^[a-z0-9_]+$/.test(name)) {
+          return interaction.reply({
+            content: "نام دسته‌بندی باید فقط شامل حروف انگلیسی، اعداد و خط زیر باشد!",
+            ephemeral: true,
+          })
+        }
+
+        if (categoryChannel.type !== ChannelType.GuildCategory) {
+          return interaction.reply({
+            content: "لطفاً یک دسته‌بندی انتخاب کنید!",
+            ephemeral: true,
+          })
+        }
+
+        // Check if category already exists
+        if (client.categories.has(name)) {
+          return interaction.reply({
+            content: "این دسته‌بندی قبلاً وجود دارد!",
+            ephemeral: true,
+          })
+        }
+
+        // Add the new category
+        client.categories.set(name, {
+          id: categoryChannel.id,
+          label: label,
+          description: description,
+          emoji: emoji,
+        })
+
+        // Save categories
+        await saveCategories()
+
+        await interaction.reply({
+          content: `دسته‌بندی "${label}" با موفقیت اضافه شد!`,
+          ephemeral: true,
+        })
+      } else if (interaction.commandName === "deletecategory") {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+          return interaction.reply({
+            content: "شما به دسترسی ادمین نیاز دارید تا بتوانید دسته‌بندی حذف کنید!",
+            ephemeral: true,
+          })
+        }
+
+        const name = interaction.options.getString("name").toLowerCase()
+
+        // Check if category exists
+        if (!client.categories.has(name)) {
+          return interaction.reply({
+            content: "این دسته‌بندی وجود ندارد!",
+            ephemeral: true,
+          })
+        }
+
+        // Get category info before deletion
+        const categoryInfo = client.categories.get(name)
+        const categoryLabel = typeof categoryInfo === "object" ? categoryInfo.label : name
+
+        // Remove the category
+        client.categories.delete(name)
+
+        // Save categories
+        await saveCategories()
+
+        await interaction.reply({
+          content: `دسته‌بندی "${categoryLabel}" با موفقیت حذف شد!`,
+          ephemeral: true,
+        })
       }
     }
 
@@ -267,36 +417,35 @@ async function handleTicketCommand(channel) {
     .setTitle("🎫 سیستم تیکت")
     .setDescription("برای ارسال تیکت، یکی از گزینه‌های زیر را انتخاب کنید.")
 
+  // Generate options dynamically from available categories
+  const options = []
+  for (const [name, categoryInfo] of client.categories) {
+    const info =
+      typeof categoryInfo === "object"
+        ? categoryInfo
+        : {
+            label: name.charAt(0).toUpperCase() + name.slice(1),
+            description: `تیکت‌های ${name}`,
+            emoji: "📝",
+          }
+
+    options.push({
+      label: info.label,
+      description: info.description,
+      value: name,
+      emoji: info.emoji,
+    })
+  }
+
+  if (options.length === 0) {
+    return channel.send({
+      content:
+        "هیچ دسته‌بندی‌ای برای تیکت تنظیم نشده است. لطفاً ابتدا دسته‌بندی‌ها را با دستور `/setup` یا `/addcategory` تنظیم کنید.",
+    })
+  }
+
   const row = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId("ticket_topic")
-      .setPlaceholder("انتخاب موضوع تیکت")
-      .addOptions([
-        {
-          label: "Exchange",
-          description: "ایجاد تیکت برای تبادل",
-          value: "exchange",
-          emoji: "🔄",
-        },
-        {
-          label: "Staff Apply",
-          description: "درخواست برای پیوستن به تیم استاف",
-          value: "staff",
-          emoji: "👥",
-        },
-        {
-          label: "Winners",
-          description: "سوالات مربوط به برندگان",
-          value: "winners",
-          emoji: "🏆",
-        },
-        {
-          label: "Other",
-          description: "سایر درخواست‌ها",
-          value: "other",
-          emoji: "❓",
-        },
-      ]),
+    new StringSelectMenuBuilder().setCustomId("ticket_topic").setPlaceholder("انتخاب موضوع تیکت").addOptions(options),
   )
 
   await channel.send({
@@ -319,20 +468,17 @@ async function createTopicTicket(interaction, topic) {
     })
   }
 
-  const categoryId = client.categories.get(topic)
-  if (!categoryId) {
+  const categoryInfo = client.categories.get(topic)
+  if (!categoryInfo) {
     return interaction.followUp({
       content: "سیستم تیکت به درستی تنظیم نشده است. لطفاً با ادمین تماس بگیرید.",
       ephemeral: true,
     })
   }
 
-  const topicNames = {
-    exchange: "Exchange",
-    staff: "Staff Apply",
-    winners: "Winners",
-    other: "Other",
-  }
+  const categoryId = typeof categoryInfo === "object" ? categoryInfo.id : categoryInfo
+  const topicLabel =
+    typeof categoryInfo === "object" ? categoryInfo.label : topic.charAt(0).toUpperCase() + topic.slice(1)
 
   // Create permission overwrites array
   const permissionOverwrites = [
@@ -364,7 +510,7 @@ async function createTopicTicket(interaction, topic) {
   }
 
   const ticketChannel = await guild.channels.create({
-    name: `ticket-${topicNames[topic].toLowerCase()}-${user.username}`,
+    name: `ticket-${topic}-${user.username}`,
     type: ChannelType.GuildText,
     parent: categoryId,
     permissionOverwrites: permissionOverwrites,
@@ -376,10 +522,10 @@ async function createTopicTicket(interaction, topic) {
     id: ticketId,
     userId: user.id,
     channelId: ticketChannel.id,
-    topic: topicNames[topic],
+    topic: topicLabel,
     createdAt: new Date(),
     closed: false,
-    messageId: null, // Store the welcome message ID for updating later
+    messageId: null,
   }
 
   const closeButton = new ActionRowBuilder().addComponents(
@@ -392,12 +538,12 @@ async function createTopicTicket(interaction, topic) {
 
   const ticketEmbed = new EmbedBuilder()
     .setColor(0x2b2d31)
-    .setTitle(`تیکت ${topicNames[topic]}`)
+    .setTitle(`تیکت ${topicLabel}`)
     .setDescription(
       `${user} به تیکت خود خوش آمدید. تیم پشتیبانی به زودی به شما کمک خواهد کرد.\n\nلطفاً مشکل خود را به طور کامل شرح دهید.`,
     )
     .addFields(
-      { name: "موضوع", value: topicNames[topic], inline: true },
+      { name: "موضوع", value: topicLabel, inline: true },
       { name: "ایجاد شده توسط", value: user.tag, inline: true },
       { name: "شناسه تیکت", value: ticketId, inline: true },
     )
@@ -677,4 +823,3 @@ async function cancelDeleteTicket(interaction, ticketId) {
 }
 
 client.login(token)
-
